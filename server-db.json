@@ -1,0 +1,38 @@
+{
+  "habits": [
+    {
+      "id": "h1",
+      "name": "Meditation",
+      "createdAt": "2026-05-28",
+      "order": 0,
+      "category": "Personal"
+    },
+    {
+      "id": "h2",
+      "name": "Excerise for 20 min",
+      "createdAt": "2026-05-28",
+      "order": 1,
+      "category": "Health"
+    },
+    {
+      "id": "h3",
+      "name": "Read 10 pages daily",
+      "createdAt": "2026-05-28",
+      "order": 2,
+      "category": "Work"
+    },
+    {
+      "id": "h4",
+      "name": "Drink 3L water dally",
+      "createdAt": "2026-05-28",
+      "order": 3,
+      "category": "Health"
+    }
+  ],
+  "logs": {
+    "h1_2026-05-28": "failed",
+    "h2_2026-05-30": "completed"
+  },
+  "isPremium": false,
+  "timestamp": 1780222099791
+}

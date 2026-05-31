@@ -1,29 +1,53 @@
 /**
  * Mossbit Progressive Web App (PWA) Service Worker
  * Resolves static caching, runtime fallbacks, and background synchronization.
- * Pure Vanilla JavaScript for direct browser Execution.
+ * Pure Vanilla JavaScript for direct browser execution. All TS assertions excluded.
  */
 
-const CACHE_NAME = 'mossbit-v1-cache';
+const CACHE_NAME = 'mossbit-v2-cache';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
-  '/src/main.tsx',
-  '/src/App.tsx',
-  '/src/index.css',
-  '/src/types.ts',
-  '/src/db.ts',
   '/manifest.json',
   '/icon.svg',
-  '/icon-maskable.svg'
+  '/icon-maskable.svg',
+  '/icon-192.png',
+  '/icon-512.png'
 ];
+
+// Helper to wrap fetch with a timeout
+function fetchWithTimeout(request, timeoutMs = 1500) {
+  return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      reject(new Error('Network request timed out'));
+    }, timeoutMs);
+
+    fetch(request).then(
+      (response) => {
+        clearTimeout(timeoutId);
+        resolve(response);
+      },
+      (err) => {
+        clearTimeout(timeoutId);
+        reject(err);
+      }
+    );
+  });
+}
 
 // On Service Worker Installation
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
       console.log('[Service Worker] Precaching critical application shell');
-      return cache.addAll(STATIC_ASSETS);
+      // Use Promise.allSettled so individual missing files do NOT block registration
+      return Promise.allSettled(
+        STATIC_ASSETS.map((asset) => {
+          return cache.add(asset)
+            .then(() => console.log(`[Service Worker] Precached successfully: ${asset}`))
+            .catch((err) => console.warn(`[Service Worker] Skipped precaching: ${asset}`, err));
+        })
+      );
     }).then(() => {
       // Force immediate control
       return self.skipWaiting();
@@ -54,11 +78,16 @@ self.addEventListener('fetch', (event) => {
   const req = event.request;
   const url = new URL(req.url);
 
+  // Exclude non-http and non-https schemes (chrome-extension, edge, etc) safely
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return;
+  }
+
   // Skip API or non-GET requests so they pass to network directly
   if (url.origin === self.location.origin && url.pathname.startsWith('/api/')) {
     event.respondWith(
       fetch(req).catch(() => {
-        // Return structured offline payload for APIs when broken
+        // Return structured offline payload for APIs when offline
         return new Response(
           JSON.stringify({
             error: true,
@@ -75,26 +104,40 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // SPA navigation fallback: serve index.html if navigating page layouts offline
+  // SPA navigation fallback: serve index.html with fast timeout (1500ms) to bypass lie-fi
   if (req.mode === 'navigate') {
     event.respondWith(
-      fetch(req).catch(() => {
-        return caches.match('/index.html') || caches.match('/');
-      })
+      fetchWithTimeout(req, 1500)
+        .then((networkResponse) => {
+          if (networkResponse && networkResponse.status === 200) {
+            const responseToCache = networkResponse.clone();
+            caches.open(CACHE_NAME).then((cache) => {
+              cache.put('/index.html', responseToCache);
+            });
+            return networkResponse;
+          }
+          return caches.match('/index.html') || caches.match('/');
+        })
+        .catch(() => {
+          return caches.match('/index.html') || caches.match('/');
+        })
     );
     return;
   }
 
-  // Standard static asset handling: Stale-While-Revalidate
+  // Standard static asset handling: Stale-While-Revalidate with CORS caching
   event.respondWith(
     caches.match(req).then((cachedResponse) => {
       if (cachedResponse) {
         // Fetch new version in background to update cache
         fetch(req).then((networkResponse) => {
           if (networkResponse && networkResponse.status === 200) {
-            caches.open(CACHE_NAME).then((cache) => {
-              cache.put(req, networkResponse);
-            });
+            const type = networkResponse.type;
+            if (type === 'basic' || type === 'cors') {
+              caches.open(CACHE_NAME).then((cache) => {
+                cache.put(req, networkResponse);
+              });
+            }
           }
         }).catch(() => {
           // Fail silently offline
@@ -102,26 +145,30 @@ self.addEventListener('fetch', (event) => {
         return cachedResponse;
       }
 
+      // If not in cache, fetch from network and dynamically cache
       return fetch(req).then((networkResponse) => {
-        if (!networkResponse || networkResponse.status !== 200 || networkResponse.type !== 'basic') {
+        if (!networkResponse || networkResponse.status !== 200) {
           return networkResponse;
         }
 
-        const responseToCache = networkResponse.clone();
-        caches.open(CACHE_NAME).then((cache) => {
-          // Cache non-POST/non-chrome-extension assets
-          if (req.method === 'GET' && !url.protocol.startsWith('chrome-extension')) {
-            cache.put(req, responseToCache);
-          }
-        });
+        const type = networkResponse.type;
+        if (type === 'basic' || type === 'cors') {
+          const responseToCache = networkResponse.clone();
+          caches.open(CACHE_NAME).then((cache) => {
+            // Avoid capturing non-GET or protocol-specific garbage
+            if (req.method === 'GET') {
+              cache.put(req, responseToCache);
+            }
+          });
+        }
 
         return networkResponse;
       }).catch(() => {
-        // offline fallback for graphics / fonts
+        // Safe offline fallbacks for graphics or fonts
         if (req.headers.get('accept') && req.headers.get('accept').includes('image')) {
           return caches.match('/icon.svg');
         }
-        return new Response('Network network failure.', { status: 408, statusText: 'Network Connection Timeout' });
+        return new Response('Network request failed.', { status: 408, statusText: 'Network Connection Timeout' });
       });
     })
   );

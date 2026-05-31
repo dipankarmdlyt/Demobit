@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect, FormEvent } from 'react';
+import { useState, useEffect, FormEvent, ChangeEvent } from 'react';
 import { 
   ArrowUpDown, 
   ChevronRight, 
@@ -34,7 +34,9 @@ import {
   FileText,
   Database,
   Wifi,
-  WifiOff
+  WifiOff,
+  Upload,
+  Smartphone
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Habit, CompletionLogs, CompletionStatus } from './types';
@@ -266,6 +268,10 @@ export default function App() {
     return localStorage.getItem('moss_premium') === 'true';
   });
 
+  const [hapticEnabled, setHapticEnabled] = useState<boolean>(() => {
+    return localStorage.getItem('moss_haptic_enabled') !== 'false';
+  });
+
   // PWA & Network Sync State variables
   const [isOnline, setIsOnline] = useState<boolean>(typeof navigator !== 'undefined' ? navigator.onLine : true);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
@@ -299,6 +305,14 @@ export default function App() {
           setIsPremium(storedPremium);
         } else {
           await saveMetadata('moss_premium', isPremium);
+        }
+
+        // Recover Haptic State
+        const storedHaptic = await getMetadata('moss_haptic_enabled');
+        if (storedHaptic !== null) {
+          setHapticEnabled(storedHaptic);
+        } else {
+          await saveMetadata('moss_haptic_enabled', hapticEnabled);
         }
 
         // 4. Recover Last Synced Info
@@ -445,6 +459,18 @@ export default function App() {
     persist();
   }, [isPremium]);
 
+  useEffect(() => {
+    async function persist() {
+      try {
+        await saveMetadata('moss_haptic_enabled', hapticEnabled);
+        localStorage.setItem('moss_haptic_enabled', hapticEnabled ? 'true' : 'false');
+      } catch (err) {
+        console.error('[PWA Database] Persistent error:', err);
+      }
+    }
+    persist();
+  }, [hapticEnabled]);
+
   // Base date of screenshot
   const SCREENSHOT_DATE = '2026-05-31';
   const [anchorDate, setAnchorDate] = useState<string>(SCREENSHOT_DATE);
@@ -477,6 +503,7 @@ export default function App() {
   const [cardCvc, setCardCvc] = useState('');
   const [email, setEmail] = useState('');
   const [paymentProcessing, setPaymentProcessing] = useState(false);
+  const [importStatus, setImportStatus] = useState<{ success: boolean; message: string } | null>(null);
 
   // Persists states in localStorage
   useEffect(() => {
@@ -526,7 +553,7 @@ export default function App() {
     playFeedbackSound(next);
 
     // Trigger subtle, lightweight vibration feedback on touch/mobile devices if supported
-    if (typeof navigator !== 'undefined' && navigator.vibrate) {
+    if (hapticEnabled && typeof navigator !== 'undefined' && navigator.vibrate) {
       // 12ms for a subtle tactile tap
       navigator.vibrate(12);
     }
@@ -580,7 +607,7 @@ export default function App() {
       [key]: 'completed'
     }));
     setActiveNotification(null);
-    if (typeof navigator !== 'undefined' && navigator.vibrate) {
+    if (hapticEnabled && typeof navigator !== 'undefined' && navigator.vibrate) {
       navigator.vibrate([15, 15, 15]);
     }
   };
@@ -708,6 +735,137 @@ export default function App() {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+  };
+
+  // Export full application state (database backup) to JSON file
+  const handleExportJSON = () => {
+    try {
+      const payload = {
+        app: 'Mossbit',
+        version: '1.0.0',
+        exportedAt: new Date().toISOString(),
+        isPremium,
+        habits,
+        logs
+      };
+      
+      const jsonStr = JSON.stringify(payload, null, 2);
+      const blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.setAttribute('href', url);
+      link.setAttribute('download', `mossbit_backup_${formatDateString(new Date())}.json`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      
+      setImportStatus({
+        success: true,
+        message: 'Successfully exported offline backup file!'
+      });
+      setTimeout(() => setImportStatus(null), 5000);
+    } catch (err: any) {
+      setImportStatus({
+        success: false,
+        message: `Failed to export: ${err.message || err}`
+      });
+      setTimeout(() => setImportStatus(null), 5000);
+    }
+  };
+
+  // Import full application state from a JSON local backup file
+  const handleImportJSON = (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      try {
+        const text = event.target?.result;
+        if (typeof text !== 'string') {
+          throw new Error('Could not read backup file contents.');
+        }
+
+        const data = JSON.parse(text);
+
+        // Validation
+        if (!data || typeof data !== 'object') {
+          throw new Error('Invalid JSON format.');
+        }
+
+        if (!Array.isArray(data.habits)) {
+          throw new Error('Backup is missing a valid habits array.');
+        }
+
+        if (!data.logs || typeof data.logs !== 'object') {
+          throw new Error('Backup is missing a valid completion logs object.');
+        }
+
+        // Deep validation of habits array entries
+        const validatedHabits: Habit[] = [];
+        for (const h of data.habits) {
+          if (!h || typeof h.id !== 'string' || typeof h.name !== 'string') {
+            throw new Error(`Invalid habit item detected inside backup payload`);
+          }
+          validatedHabits.push({
+            id: h.id,
+            name: h.name,
+            createdAt: typeof h.createdAt === 'string' ? h.createdAt : new Date().toISOString(),
+            order: typeof h.order === 'number' ? h.order : validatedHabits.length,
+            reminderEnabled: !!h.reminderEnabled,
+            reminderTime: typeof h.reminderTime === 'string' ? h.reminderTime : '09:00',
+            category: typeof h.category === 'string' ? h.category : 'Personal'
+          });
+        }
+
+        // Deep validation of logs object
+        const validatedLogs: CompletionLogs = {};
+        for (const [key, value] of Object.entries(data.logs)) {
+          if (value === 'completed' || value === 'failed' || value === 'none') {
+            validatedLogs[key] = value;
+          }
+        }
+
+        // Update state managers
+        setHabits(validatedHabits);
+        setLogs(validatedLogs);
+
+        const restoredPremium = !!data.isPremium;
+        setIsPremium(restoredPremium);
+
+        // Save to IndexedDB
+        await saveLocalHabits(validatedHabits);
+        await saveLocalLogs(validatedLogs);
+        await saveMetadata('moss_premium', restoredPremium);
+
+        // Save to localStorage secondary cache
+        localStorage.setItem('moss_habits', JSON.stringify(validatedHabits));
+        localStorage.setItem('moss_logs', JSON.stringify(validatedLogs));
+        localStorage.setItem('moss_premium', restoredPremium ? 'true' : 'false');
+
+        // Trigger immediate cloud resync if active
+        if (navigator.onLine) {
+          triggerServerSync(validatedHabits, validatedLogs, restoredPremium);
+        }
+
+        setImportStatus({
+          success: true,
+          message: `Database restored cleanly! Loaded ${validatedHabits.length} habits & historical completions.`
+        });
+        setTimeout(() => setImportStatus(null), 6000);
+
+      } catch (err: any) {
+        setImportStatus({
+          success: false,
+          message: `Restore failed: ${err.message || err}`
+        });
+        setTimeout(() => setImportStatus(null), 8000);
+      }
+    };
+
+    reader.readAsText(file);
+    // Reset file input value to allow importing the same file again
+    e.target.value = '';
   };
 
   // Copy support email to clipboard
@@ -1064,14 +1222,48 @@ export default function App() {
                 </div>
 
                 <div className="space-y-2.5">
+                  {importStatus && (
+                    <motion.div 
+                      initial={{ opacity: 0, y: -4 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className={`p-3 rounded-xl text-[11px] leading-relaxed border ${
+                        importStatus.success 
+                          ? 'bg-emerald-950/25 text-emerald-300 border-emerald-500/20' 
+                          : 'bg-red-950/25 text-red-300 border-red-500/20'
+                      }`}
+                    >
+                      {importStatus.message}
+                    </motion.div>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={handleExportJSON}
+                    className="w-full flex justify-between items-center px-3.5 py-3 border border-zinc-900 bg-zinc-950/40 hover:bg-zinc-900/40 text-emerald-400 hover:text-emerald-300 text-xs font-medium rounded-xl transition-all cursor-pointer"
+                  >
+                    <span>Export Local Backup (JSON)</span>
+                    <Download className="w-4 h-4 text-emerald-500" />
+                  </button>
+
+                  <label className="w-full flex justify-between items-center px-3.5 py-3 border border-zinc-900 bg-zinc-950/40 hover:bg-zinc-900/40 text-emerald-400 hover:text-emerald-300 text-xs font-medium rounded-xl transition-all cursor-pointer">
+                    <span>Import Local Backup (JSON)</span>
+                    <Upload className="w-4 h-4 text-emerald-500" />
+                    <input 
+                      type="file" 
+                      accept=".json" 
+                      onChange={handleImportJSON} 
+                      className="hidden" 
+                    />
+                  </label>
+
                   <button
                     type="button"
                     id="page-export-csv"
                     onClick={handleExportCSV}
-                    className="w-full flex justify-between items-center px-3.5 py-3 border border-zinc-855 border-zinc-900 bg-zinc-950/40 hover:bg-zinc-900/40 text-emerald-400 hover:text-emerald-300 text-xs font-medium rounded-xl transition-all cursor-pointer"
+                    className="w-full flex justify-between items-center px-3.5 py-3 border border-zinc-900 bg-zinc-950/40 hover:bg-zinc-900/40 text-zinc-300 hover:text-zinc-100 text-xs rounded-xl transition-all cursor-pointer"
                   >
                     <span>Export checklist history (CSV)</span>
-                    <Download className="w-4 h-4 text-emerald-500" />
+                    <Download className="w-4 h-4 text-zinc-500" />
                   </button>
 
                   <button
@@ -1096,6 +1288,42 @@ export default function App() {
                   >
                     <span>Clear all habits & logs</span>
                     <Trash2 className="w-3.5 h-3.5 text-red-500" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Tactile Feedback Settings Section */}
+              <div className="bg-[#070707] border border-zinc-900/40 p-5 rounded-2xl space-y-4">
+                <div className="flex items-center gap-2 border-b border-zinc-900 pb-2">
+                  <Smartphone className="w-4 h-4 text-emerald-400" />
+                  <h4 className="text-xs font-bold text-zinc-300 font-mono uppercase tracking-wider">Tactile Settings</h4>
+                </div>
+
+                <div className="flex items-center justify-between py-1">
+                  <div className="pr-4">
+                    <p className="text-xs font-medium text-zinc-200">Haptic Feedback</p>
+                    <p className="text-zinc-500 text-[10px] mt-1 leading-normal">
+                      Subtle tactile vibration feedback on habit checkoffs and system completions.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    id="haptic-toggle-switch"
+                    onClick={() => {
+                      const nextVal = !hapticEnabled;
+                      setHapticEnabled(nextVal);
+                      if (nextVal && typeof navigator !== 'undefined' && navigator.vibrate) {
+                        navigator.vibrate(12);
+                      }
+                    }}
+                    className={`w-11 h-6 flex items-center rounded-full p-0.5 transition-colors duration-200 shrink-0 cursor-pointer ${
+                      hapticEnabled ? 'bg-emerald-500 justify-end' : 'bg-zinc-800 justify-start'
+                    }`}
+                  >
+                    <motion.div
+                      layout
+                      className="w-5 h-5 rounded-full bg-zinc-950 shadow-md border border-zinc-800"
+                    />
                   </button>
                 </div>
               </div>
