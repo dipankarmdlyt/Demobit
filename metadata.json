@@ -1,0 +1,8 @@
+{
+  "name": "Remix: Mossbit",
+  "description": "A minimalist, dark-themed habit tracking app recreating the Mossbit mobile app interface with precise layout, grid visualizer, and custom date range navigation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
